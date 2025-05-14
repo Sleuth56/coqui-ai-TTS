@@ -39,7 +39,7 @@ def create_argparser() -> argparse.ArgumentParser:
         help="Name of one of the pre-trained tts models in format <language>/<dataset>/<model_name>",
     )
     parser.add_argument("--vocoder_name", type=str, default=None, help="name of one of the released vocoder models.")
-    parser.add_argument("--speaker_name", type=str, default=None, help="name of the speaker to use in multi-speaker models.")
+    parser.add_argument("--speaker_id", type=str, default=None, help="Default speaker ID/key for multi-speaker models (overridden by request).")
 
     # Args for running custom models
     parser.add_argument("--config_path", default=None, type=str, help="Path to model config file.")
@@ -92,7 +92,8 @@ if args.use_cuda:
 
 # CASE2: load models
 model_name = args.model_name if args.model_path is None else None
-speaker_name = args.speaker_name
+default_speaker = args.speaker_id
+
 api = TTS(
     model_name=model_name,
     model_path=args.model_path,
@@ -164,11 +165,17 @@ lock = Lock()
 def tts():
     with lock:
         text = request.headers.get("text") or request.values.get("text", "")
-        speaker_idx = (
-            request.headers.get("speaker-id") or request.values.get("speaker_id", "") if api.is_multi_speaker else None
-        )
-        if speaker_idx == "":
-            speaker_idx = None
+        
+        speaker_idx = None
+        if api.is_multi_speaker:
+            speaker_idx = (
+                request.headers.get("speaker-id")
+                or request.values.get("speaker_id")
+                or default_speaker
+            )
+            if speaker_idx not in api.speakers:
+                return (f"Unknown speaker_id '{speaker_idx}'. Valid: {api.speakers}",400)
+        
         language_idx = (
             request.headers.get("language-id") or request.values.get("language_id", "")
             if api.is_multi_lingual
@@ -181,7 +188,15 @@ def tts():
         logger.info("Model input: %s", text)
         logger.info("Speaker idx: %s", speaker_idx)
         logger.info("Language idx: %s", language_idx)
-        wavs = api.tts(text, speaker=speaker_idx, language=language_idx, style_wav=style_wav, speaker_wav=speaker_wav)
+        
+        wavs = api.tts(
+            text, 
+            speaker=speaker_idx, 
+            language=language_idx, 
+            style_wav=style_wav, 
+            speaker_wav=speaker_wav
+        )
+        
         out = io.BytesIO()
         api.synthesizer.save_wav(wavs, out)
     return send_file(out, mimetype="audio/wav")
@@ -226,10 +241,14 @@ def mary_tts_api_process():
             text = request.args.get("INPUT_TEXT", "")
             speaker_idx = request.args.get("VOICE", "")
 
-        speaker_name = speaker_idx if speaker_idx else args.speaker_name
-
-        print(f" > Voice: {speaker_name}, Model input: {text}")
-        wavs = api.synthesizer.tts(text, speaker_name=speaker_name)
+        if not speaker_idx:
+            speaker_idx = default_speaker
+        if api.is_multi_speaker and speaker_idx not in api.speakers:
+            return (f"Unknown VOICE '{speaker_idx}'. Valid: {api.speakers}", 400)
+        
+        logger.info("MaryTTS /process: VOICE=%s  TEXT=%s", speaker_idx, text)
+        wavs = api.tts(text, speaker=speaker_idx)
+        
         out = io.BytesIO()
         api.synthesizer.save_wav(wavs, out)
     return send_file(out, mimetype="audio/wav")
